@@ -23,11 +23,26 @@ class SapiEventsSink(object):
 
     def StartStream(self, StreamNumber, StreamPosition):
         self.bridge.is_speaking = True
+        self.bridge.active_streams.add(StreamNumber)
         self.bridge.send_response({"event": "start", "stream": StreamNumber})
 
     def EndStream(self, StreamNumber, StreamPosition):
-        if self.bridge.is_speaking:
+        if StreamNumber not in self.bridge.active_streams:
+            return
+            
+        self.bridge.active_streams.remove(StreamNumber)
+            
+        # Check if SpVoice is still busy speaking or has queued items
+        is_busy = False
+        try:
+            # RunningState: 2 is speaking/busy, 1 is done/idle
+            is_busy = (self.bridge.voice.Status.RunningState == 2)
+        except Exception:
+            is_busy = bool(self.bridge.active_streams)
+            
+        if not is_busy:
             self.bridge.is_speaking = False
+            self.bridge.active_streams.clear()
             self.bridge.send_response({"event": "end", "stream": StreamNumber})
 
     def Bookmark(self, StreamNumber, StreamPosition, Bookmark, BookmarkId):
@@ -53,6 +68,7 @@ class SaoMaiBridge(object):
         self.connection = None
         self.cmd_queue = queue.Queue()
         self.is_speaking = False
+        self.active_streams = set()
 
     def init_sapi(self):
         # Register registry entries under HKCU
@@ -228,11 +244,18 @@ class SaoMaiBridge(object):
                 # SVSFlagsAsync = 1, SVSFIsXML = 8
                 # SAPI5 will automatically queue multiple Speak calls sequentially
                 flags = 1 | 8
-                self.voice.Speak(text, flags)
+                try:
+                    stream_num = self.voice.Speak(text, flags)
+                    if isinstance(stream_num, int):
+                        self.active_streams.add(stream_num)
+                except Exception as e:
+                    sys.stderr.write(f"Speak error: {e}\n")
+                    sys.stderr.flush()
             
         elif action == "cancel":
             # Always execute cancel to ensure the engine is cleared properly
             self.is_speaking = False
+            self.active_streams.clear()
             self.voice.Speak("", 2)
             
         elif action == "exit":
