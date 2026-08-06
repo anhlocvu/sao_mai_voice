@@ -6,6 +6,8 @@ import sys
 import time
 import synthDriverHandler
 from logHandler import log
+from synthDriverHandler import synthIndexReached, synthDoneSpeaking
+from speech.commands import IndexCommand
 
 class SynthDriver(synthDriverHandler.SynthDriver):
     name = "sao_mai_voice"
@@ -14,8 +16,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
     supportedSettings = [
         synthDriverHandler.SynthDriver.VoiceSetting(),
         synthDriverHandler.SynthDriver.RateSetting(),
+        synthDriverHandler.SynthDriver.RateBoostSetting(),
+        synthDriverHandler.SynthDriver.PitchSetting(),
         synthDriverHandler.SynthDriver.VolumeSetting(),
     ]
+
+    supportedNotifications = {synthIndexReached, synthDoneSpeaking}
 
     def __init__(self):
         super(SynthDriver, self).__init__()
@@ -23,6 +29,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         self._voices = []
         self._current_voice = None
         self._rate = 50  # NVDA default rate
+        self._rateBoost = False
+        self._pitch = 50
         self._volume = 100
         self._is_speaking = False
         
@@ -122,9 +130,17 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             self._is_speaking = True
         elif event == "end":
             self._is_speaking = False
-        elif event == "word":
-            # Optional: handle word position if needed by NVDA
-            pass
+            import queueHandler
+            queueHandler.queueFunction(queueHandler.eventQueue, synthDoneSpeaking.notify, self)
+        elif event == "bookmark":
+            mark = data.get("mark")
+            if mark:
+                try:
+                    index = int(mark)
+                    import queueHandler
+                    queueHandler.queueFunction(queueHandler.eventQueue, synthIndexReached.notify, self, index)
+                except ValueError:
+                    pass
 
     @classmethod
     def check(cls):
@@ -136,19 +152,38 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         dll_path = os.path.join(plugin_dir, "lib", "VnTtsEng.dll")
         return os.path.exists(python_exe) and os.path.exists(dll_path)
 
+    def _calculate_sapi_rate(self):
+        if not self._rateBoost:
+            # Scale 0-100 to SAPI5 rate -10 to 3
+            return int((self._rate * 13 / 100) - 10)
+        else:
+            # Scale 0-100 to SAPI5 rate 4 to 10
+            return int((self._rate * 6 / 100) + 4)
+
     def speak(self, speechSequence):
-        text = ""
+        import xml.sax.saxutils
+        
+        parts = []
+        has_text = False
+        
         for item in speechSequence:
             if isinstance(item, str):
-                text += item
-            # We can handle other types of speech events here if needed
+                parts.append(xml.sax.saxutils.escape(item))
+                has_text = True
+            elif isinstance(item, IndexCommand):
+                parts.append(f'<bookmark mark="{item.index}"/>')
+                
+        if parts:
+            text = "".join(parts)
+            sapi_rate = self._calculate_sapi_rate()
+            sapi_pitch = int((self._pitch / 5) - 10)
             
-        if text:
-            # Map rate 0-100 to SAPI5 rate -10 to 10
-            sapi_rate = int((self._rate / 5) - 10)
+            # Wrap in pitch tag
+            xml_text = f'<pitch absmiddle="{sapi_pitch}">{text}</pitch>'
+            
             self._send_cmd({
                 "action": "speak",
-                "text": text,
+                "text": xml_text,
                 "voice": self._current_voice,
                 "rate": sapi_rate,
                 "volume": self._volume
@@ -199,7 +234,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 "action": "speak",
                 "text": "", # Empty speak updates settings
                 "voice": self._current_voice,
-                "rate": int((self._rate / 5) - 10),
+                "rate": self._calculate_sapi_rate(),
                 "volume": self._volume
             })
 
@@ -212,7 +247,33 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             "action": "speak",
             "text": "",
             "voice": self._current_voice,
-            "rate": int((self._rate / 5) - 10),
+            "rate": self._calculate_sapi_rate(),
+            "volume": self._volume
+        })
+
+    def _get_rateBoost(self):
+        return self._rateBoost
+
+    def _set_rateBoost(self, val):
+        self._rateBoost = val
+        self._send_cmd({
+            "action": "speak",
+            "text": "",
+            "voice": self._current_voice,
+            "rate": self._calculate_sapi_rate(),
+            "volume": self._volume
+        })
+
+    def _get_pitch(self):
+        return self._pitch
+
+    def _set_pitch(self, val):
+        self._pitch = val
+        self._send_cmd({
+            "action": "speak",
+            "text": "",
+            "voice": self._current_voice,
+            "rate": self._calculate_sapi_rate(),
             "volume": self._volume
         })
 
@@ -225,7 +286,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             "action": "speak",
             "text": "",
             "voice": self._current_voice,
-            "rate": int((self._rate / 5) - 10),
+            "rate": self._calculate_sapi_rate(),
             "volume": self._volume
         })
         

@@ -40,5 +40,19 @@ Dự án phát triển addon **Sao Mai Voice** làm một Synthesizer độc l�
    - Đã sửa bằng cách tinh chỉnh lại hàm khởi tạo `synthDriverHandler.VoiceInfo` trong `sao_mai_voice.py`, chỉ truyền đúng 3 tham số cần thiết theo đúng đặc tả của NVDA 2026.1+.
 5. **Cập nhật giọng mặc định**:
    - Thay đổi thứ tự ưu tiên chọn giọng mặc định ban đầu khi cài đặt: Ưu tiên chọn giọng `Minh Du` trước, sau đó tới `Mai Dung` và cuối cùng mới là các giọng khác có sẵn.
+6. **Thêm tùy chỉnh Độ cao (Pitch) và Tăng tốc độ đọc (Rate Boost)**:
+   - Đã thêm `PitchSetting` và `RateBoostSetting` vào `supportedSettings` của driver `sao_mai_voice.py`.
+   - Mô phỏng tính năng `Rate Boost` bằng cách chia dải tốc độ: khi tắt Rate Boost, dải tốc độ trong NVDA (0-100) sẽ ánh xạ tương đương sang dải `-10` đến `+3` của SAPI5; khi bật Rate Boost, dải này sẽ ánh xạ sang dải cực nhanh `+4` đến `+10`.
+   - Ánh xạ độ cao (Pitch) từ dải 0-100 của NVDA sang dải `-10` đến `+10` (XML `absmiddle`) của SAPI5.
+   - Chuyển đổi chuỗi văn bản của `speechSequence` thành định dạng XML có hỗ trợ thẻ `<pitch absmiddle="...">` và escape XML để đảm bảo an toàn cú pháp.
+7. **Sửa lỗi đọc thiếu câu (mất chữ "space" và tên ứng dụng khi chuyển tiêu điểm)**:
+    - Khai báo `supportedNotifications = {synthIndexReached, synthDoneSpeaking}` trong driver và bổ sung import chúng từ `synthDriverHandler` ở đầu file để tránh NameError. Đồng thời import `IndexCommand` từ `speech.commands` để khắc phục lỗi `AttributeError` khi so khớp loại phần tử trong `speechSequence`.
+   - Thêm phương thức nhận sự kiện `Bookmark` trong `SapiEventsSink` của tiến trình `bridge.py` 32-bit để lắng nghe khi engine đọc đến các bookmark định vị của NVDA.
+   - Dịch các đối tượng `IndexCommand` trong `speechSequence` thành thẻ XML `<bookmark mark="index"/>` gửi cho bridge.
+   - Khi nhận được các sự kiện `"end"` hoặc `"bookmark"` từ bridge, driver 64-bit sử dụng `queueHandler.queueFunction` để đẩy các thông báo `synthDoneSpeaking.notify()` và `synthIndexReached.notify()` về luồng chính của NVDA. Điều này giúp NVDA core đồng bộ hóa hoàn hảo với tiến độ đọc của engine, giải quyết triệt để lỗi bỏ sót/nuốt chữ.
+   - Chỉ cho phép bridge gọi lệnh `cancel` (`Speak("", 2)`) khi trạng thái `self.is_speaking` thực sự là `True` để tránh làm đơ/nghẽn engine Sao Mai VNVoice khi nó đang im lặng.
+8. **Tối ưu hóa độ nhạy phản hồi (loại bỏ trễ vài ms)**:
+   - Thay đổi vòng lặp chính của `bridge.py`: loại bỏ `time.sleep(0.01)` thừa và thay bằng block hàng đợi có timeout `self.cmd_queue.get(timeout=0.001)` kết hợp `comtypes.client.PumpEvents(0.001)`. Giúp giảm độ trễ phản hồi khi có lệnh mới xuống mức micro-giây (gần như 0ms) mà hoàn toàn không tốn tài nguyên CPU khi nhàn rỗi.
+   - Bổ sung cơ chế **Gộp lệnh trong hàng đợi (Command Coalescing)**: Khi người dùng di chuyển mũi tên hoặc gõ nhanh làm dồn toa các lệnh trong hàng đợi, bridge tự động gộp các thay đổi thiết lập (rate, volume) mới nhất và chỉ thực thi hành động phát âm cuối cùng, loại bỏ toàn bộ các lệnh phát âm trung gian và lệnh cancel thừa. Giúp engine hoạt động mượt mà và nhạy hơn gấp nhiều lần.
 
 Tệp addon đã được đóng gói thành công và sẵn sàng để cài đặt. Nó hoạt động hoàn toàn độc lập, tự hiển thị là một bộ đọc riêng biệt mang tên "Sao Mai Voice" trong NVDA.

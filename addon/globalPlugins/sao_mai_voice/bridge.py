@@ -22,10 +22,19 @@ class SapiEventsSink(object):
         self.bridge = bridge
 
     def StartStream(self, StreamNumber, StreamPosition):
+        self.bridge.is_speaking = True
         self.bridge.send_response({"event": "start", "stream": StreamNumber})
 
     def EndStream(self, StreamNumber, StreamPosition):
+        self.bridge.is_speaking = False
         self.bridge.send_response({"event": "end", "stream": StreamNumber})
+
+    def Bookmark(self, StreamNumber, StreamPosition, Bookmark, BookmarkId):
+        self.bridge.send_response({
+            "event": "bookmark",
+            "mark": Bookmark,
+            "stream": StreamNumber
+        })
 
     def Word(self, StreamNumber, StreamPosition, CharacterPosition, Length):
         self.bridge.send_response({
@@ -42,6 +51,7 @@ class SaoMaiBridge(object):
         self.tokens = {}
         self.connection = None
         self.cmd_queue = queue.Queue()
+        self.is_speaking = False
 
     def init_sapi(self):
         # Register registry entries under HKCU
@@ -77,6 +87,78 @@ class SaoMaiBridge(object):
         self.connection = comtypes.client.GetEvents(self.voice, self.sink)
         self.send_response({"status": "ready", "voices": list(self.tokens.keys())})
 
+    def coalesce_commands(self, cmds):
+        if not cmds:
+            return []
+            
+        # Check for exit command first
+        for cmd in cmds:
+            if cmd.get("action") == "exit":
+                return [{"action": "exit"}]
+                
+        latest_voice = None
+        latest_rate = None
+        latest_volume = None
+        
+        final_action = None
+        final_text = None
+        
+        for cmd in cmds:
+            action = cmd.get("action")
+            if action == "speak":
+                if "voice" in cmd and cmd["voice"] is not None:
+                    latest_voice = cmd["voice"]
+                if "rate" in cmd and cmd["rate"] is not None:
+                    latest_rate = cmd["rate"]
+                if "volume" in cmd and cmd["volume"] is not None:
+                    latest_volume = cmd["volume"]
+                
+                text = cmd.get("text", "")
+                if text:
+                    final_action = "speak"
+                    final_text = text
+            elif action == "cancel":
+                final_action = "cancel"
+                final_text = None
+                
+        coalesced = []
+        
+        if final_action == "speak":
+            speak_cmd = {
+                "action": "speak",
+                "text": final_text,
+                "voice": latest_voice,
+                "rate": latest_rate,
+                "volume": latest_volume
+            }
+            speak_cmd = {k: v for k, v in speak_cmd.items() if v is not None}
+            coalesced.append(speak_cmd)
+        elif final_action == "cancel":
+            settings_cmd = {
+                "action": "speak",
+                "text": "",
+                "voice": latest_voice,
+                "rate": latest_rate,
+                "volume": latest_volume
+            }
+            settings_cmd = {k: v for k, v in settings_cmd.items() if v is not None}
+            if len(settings_cmd) > 2:
+                coalesced.append(settings_cmd)
+            coalesced.append({"action": "cancel"})
+        else:
+            settings_cmd = {
+                "action": "speak",
+                "text": "",
+                "voice": latest_voice,
+                "rate": latest_rate,
+                "volume": latest_volume
+            }
+            settings_cmd = {k: v for k, v in settings_cmd.items() if v is not None}
+            if len(settings_cmd) > 2:
+                coalesced.append(settings_cmd)
+                
+        return coalesced
+
     def run(self):
         try:
             self.init_sapi()
@@ -88,19 +170,30 @@ class SaoMaiBridge(object):
 
             # Main loop on Main Thread to process COM events and queue commands
             while self.running:
-                # Pump COM messages to process events
-                comtypes.client.PumpEvents(0.01)
+                # Pump COM events briefly (1ms timeout) to allow SAPI events to be fired
+                comtypes.client.PumpEvents(0.001)
                 
                 # Process commands from queue on Main Thread
+                cmds = []
                 try:
+                    # Wait up to 1ms for the first command. 
+                    # This blocks and keeps CPU usage at 0% when idle.
+                    cmd = self.cmd_queue.get(timeout=0.001)
+                    cmds.append(cmd)
+                    self.cmd_queue.task_done()
+                    
+                    # Pull any additional commands that are already in the queue immediately
                     while not self.cmd_queue.empty():
                         cmd = self.cmd_queue.get_nowait()
-                        self.handle_command(cmd)
+                        cmds.append(cmd)
                         self.cmd_queue.task_done()
                 except queue.Empty:
                     pass
-                    
-                time.sleep(0.01)
+                
+                if cmds:
+                    coalesced = self.coalesce_commands(cmds)
+                    for cmd in coalesced:
+                        self.handle_command(cmd)
         except Exception as e:
             # Write error to stderr so it goes to log file
             sys.stderr.write(f"Bridge run error: {e}\n")
@@ -149,13 +242,18 @@ class SaoMaiBridge(object):
                 self.voice.Volume = int(volume)
                 
             # Speak asynchronously
-            # SPF_ASYNC = 1, SPF_PURGEBEFORESPEAK = 2
-            flags = 1 | 2
-            self.voice.Speak(text, flags)
+            if not text:
+                self.voice.Speak("", 2)
+            else:
+                # SPF_ASYNC = 1, SPF_PURGEBEFORESPEAK = 2, SPF_IS_XML = 8
+                flags = 1 | 2 | 8
+                self.voice.Speak(text, flags)
             
         elif action == "cancel":
-            # Cancel current speech by speaking empty string with PURGE
-            self.voice.Speak("", 2)
+            # Cancel current speech only if the voice is actually speaking,
+            # using PURGE to clear the speech queue.
+            if self.is_speaking:
+                self.voice.Speak("", 2)
             
         elif action == "exit":
             self.running = False
