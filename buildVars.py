@@ -18,7 +18,7 @@ addon_info = AddonInfo(
 	# Add-on summary/title, usually the user visible name of the add-on
 	# Translators: Summary/title for this add-on
 	# to be shown on installation and add-on information found in add-on store
-	addon_summary=_("sao mai voice for nvda"),
+	addon_summary=_("sao mai vn voice for nvda"),
 	# Add-on description
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""This addon contains all Vietnamese voices from Sao Mai Voice."""),
@@ -36,7 +36,7 @@ addon_info = AddonInfo(
 	# Documentation file name
 	addon_docFileName="readme.md",
 	# Minimum NVDA version supported (e.g. "2019.3.0", minor version is optional)
-	addon_minimumNVDAVersion="2026.1",
+	addon_minimumNVDAVersion="2025.1",
 	# Last NVDA version supported/tested (e.g. "2024.4.0", ideally more recent than minimum version)
 	addon_lastTestedNVDAVersion=2026.1,
 	# Add-on update channel (default is None, denoting stable releases,
