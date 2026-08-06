@@ -26,8 +26,9 @@ class SapiEventsSink(object):
         self.bridge.send_response({"event": "start", "stream": StreamNumber})
 
     def EndStream(self, StreamNumber, StreamPosition):
-        self.bridge.is_speaking = False
-        self.bridge.send_response({"event": "end", "stream": StreamNumber})
+        if self.bridge.is_speaking:
+            self.bridge.is_speaking = False
+            self.bridge.send_response({"event": "end", "stream": StreamNumber})
 
     def Bookmark(self, StreamNumber, StreamPosition, Bookmark, BookmarkId):
         self.bridge.send_response({
@@ -96,62 +97,49 @@ class SaoMaiBridge(object):
             if cmd.get("action") == "exit":
                 return [{"action": "exit"}]
                 
-        latest_voice = None
-        latest_rate = None
-        latest_volume = None
+        coalesced = []
         
-        final_action = None
-        final_text = None
+        # Accumulate settings
+        current_voice = None
+        current_rate = None
+        current_volume = None
         
         for cmd in cmds:
             action = cmd.get("action")
             if action == "speak":
                 if "voice" in cmd and cmd["voice"] is not None:
-                    latest_voice = cmd["voice"]
+                    current_voice = cmd["voice"]
                 if "rate" in cmd and cmd["rate"] is not None:
-                    latest_rate = cmd["rate"]
+                    current_rate = cmd["rate"]
                 if "volume" in cmd and cmd["volume"] is not None:
-                    latest_volume = cmd["volume"]
+                    current_volume = cmd["volume"]
                 
                 text = cmd.get("text", "")
                 if text:
-                    final_action = "speak"
-                    final_text = text
+                    # Create a new speak command with accumulated settings so far
+                    speak_cmd = {
+                        "action": "speak",
+                        "text": text,
+                        "voice": current_voice,
+                        "rate": current_rate,
+                        "volume": current_volume
+                    }
+                    speak_cmd = {k: v for k, v in speak_cmd.items() if v is not None}
+                    coalesced.append(speak_cmd)
+                    
             elif action == "cancel":
-                final_action = "cancel"
-                final_text = None
+                # Cancel clears all pending speak commands in the batch
+                coalesced = [{"action": "cancel"}]
                 
-        coalesced = []
-        
-        if final_action == "speak":
-            speak_cmd = {
-                "action": "speak",
-                "text": final_text,
-                "voice": latest_voice,
-                "rate": latest_rate,
-                "volume": latest_volume
-            }
-            speak_cmd = {k: v for k, v in speak_cmd.items() if v is not None}
-            coalesced.append(speak_cmd)
-        elif final_action == "cancel":
+        # If there are accumulated settings at the end and no speak command followed them,
+        # we append a settings update command (speak with empty text)
+        if not coalesced or coalesced[-1].get("action") == "cancel":
             settings_cmd = {
                 "action": "speak",
                 "text": "",
-                "voice": latest_voice,
-                "rate": latest_rate,
-                "volume": latest_volume
-            }
-            settings_cmd = {k: v for k, v in settings_cmd.items() if v is not None}
-            if len(settings_cmd) > 2:
-                coalesced.append(settings_cmd)
-            coalesced.append({"action": "cancel"})
-        else:
-            settings_cmd = {
-                "action": "speak",
-                "text": "",
-                "voice": latest_voice,
-                "rate": latest_rate,
-                "volume": latest_volume
+                "voice": current_voice,
+                "rate": current_rate,
+                "volume": current_volume
             }
             settings_cmd = {k: v for k, v in settings_cmd.items() if v is not None}
             if len(settings_cmd) > 2:
@@ -170,19 +158,13 @@ class SaoMaiBridge(object):
 
             # Main loop on Main Thread to process COM events and queue commands
             while self.running:
-                # Pump COM events briefly (1ms timeout) to allow SAPI events to be fired
-                comtypes.client.PumpEvents(0.001)
+                # Pump COM events briefly (2ms timeout) to allow SAPI events to be fired
+                # This blocks the main thread in a COM-safe way when idle.
+                comtypes.client.PumpEvents(0.002)
                 
-                # Process commands from queue on Main Thread
+                # Process commands from queue on Main Thread (non-blocking)
                 cmds = []
                 try:
-                    # Wait up to 1ms for the first command. 
-                    # This blocks and keeps CPU usage at 0% when idle.
-                    cmd = self.cmd_queue.get(timeout=0.001)
-                    cmds.append(cmd)
-                    self.cmd_queue.task_done()
-                    
-                    # Pull any additional commands that are already in the queue immediately
                     while not self.cmd_queue.empty():
                         cmd = self.cmd_queue.get_nowait()
                         cmds.append(cmd)
@@ -232,7 +214,7 @@ class SaoMaiBridge(object):
             rate = cmd.get("rate")
             volume = cmd.get("volume")
             
-            # Apply settings if provided
+            # Apply settings if provided (takes effect immediately on SpVoice)
             if voice_name and voice_name in self.tokens:
                 self.voice.Voice = self.tokens[voice_name]
             if rate is not None:
@@ -241,19 +223,17 @@ class SaoMaiBridge(object):
             if volume is not None:
                 self.voice.Volume = int(volume)
                 
-            # Speak asynchronously
-            if not text:
-                self.voice.Speak("", 2)
-            else:
-                # SPF_ASYNC = 1, SPF_PURGEBEFORESPEAK = 2, SPF_IS_XML = 8
-                flags = 1 | 2 | 8
+            # Speak asynchronously if text is provided
+            if text:
+                # SVSFlagsAsync = 1, SVSFIsXML = 8
+                # SAPI5 will automatically queue multiple Speak calls sequentially
+                flags = 1 | 8
                 self.voice.Speak(text, flags)
             
         elif action == "cancel":
-            # Cancel current speech only if the voice is actually speaking,
-            # using PURGE to clear the speech queue.
-            if self.is_speaking:
-                self.voice.Speak("", 2)
+            # Always execute cancel to ensure the engine is cleared properly
+            self.is_speaking = False
+            self.voice.Speak("", 2)
             
         elif action == "exit":
             self.running = False

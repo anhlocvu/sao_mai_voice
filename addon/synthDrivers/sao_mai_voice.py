@@ -21,7 +21,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         synthDriverHandler.SynthDriver.VolumeSetting(),
     ]
 
-    supportedNotifications = {synthIndexReached, synthDoneSpeaking}
+    supportedNotifications = {synthDoneSpeaking}
 
     def __init__(self):
         super(SynthDriver, self).__init__()
@@ -132,15 +132,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             self._is_speaking = False
             import queueHandler
             queueHandler.queueFunction(queueHandler.eventQueue, synthDoneSpeaking.notify, self)
-        elif event == "bookmark":
-            mark = data.get("mark")
-            if mark:
-                try:
-                    index = int(mark)
-                    import queueHandler
-                    queueHandler.queueFunction(queueHandler.eventQueue, synthIndexReached.notify, self, index)
-                except ValueError:
-                    pass
 
     @classmethod
     def check(cls):
@@ -170,8 +161,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             if isinstance(item, str):
                 parts.append(xml.sax.saxutils.escape(item))
                 has_text = True
-            elif isinstance(item, IndexCommand):
-                parts.append(f'<bookmark mark="{item.index}"/>')
                 
         if parts:
             text = "".join(parts)
@@ -192,6 +181,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
     def cancel(self):
         self._send_cmd({"action": "cancel"})
         self._is_speaking = False
+        import queueHandler
+        queueHandler.queueFunction(queueHandler.eventQueue, synthDoneSpeaking.notify, self)
 
     # Getters/Setters for Settings
     def _get_availableVoices(self):
